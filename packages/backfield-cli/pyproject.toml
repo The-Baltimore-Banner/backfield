@@ -10,7 +10,7 @@ classifiers = [
 dependencies = [
     "backfield-auth",
     "backfield-db",
-    "cryptography>=42.0.0",
+    "cryptography>=50.0.0",
     "pydantic>=2.0.0",
     "rich>=13.0.0",
 ]
