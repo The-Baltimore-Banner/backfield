@@ -13,6 +13,7 @@
 </p>
 
 <p align="center">
+  <a href="https://localangle.co/backfield/">Learn more</a> &bull;
   <a href="https://try.backfield.news/">Try it</a> &bull;
   <a href="https://docs.backfield.news">Documentation</a> &bull;
   <a href="https://github.com/localangle/backfield-cookbook">Cookbook</a> &bull;
