@@ -222,3 +222,148 @@ def test_a_point_outside_the_radius_is_still_excluded() -> None:
             )
         finally:
             _cleanup(session, project_id)
+
+
+def _rectangle(*, half_lng: float, half_lat: float) -> dict:
+    """Build the five-point box a geocoder viewport produces."""
+    min_lng = CENTER_LNG - half_lng
+    max_lng = CENTER_LNG + half_lng
+    min_lat = CENTER_LAT - half_lat
+    max_lat = CENTER_LAT + half_lat
+    return {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [min_lng, min_lat],
+                [max_lng, min_lat],
+                [max_lng, max_lat],
+                [min_lng, max_lat],
+                [min_lng, min_lat],
+            ]
+        ],
+    }
+
+
+def _seed_two_areas(session: Session, suffix: str):
+    """Seed a state-scale box and a block-scale box, both over the center.
+
+    The query center is the centroid of the larger box on purpose. A rule that
+    compared only centroids would still return the state article from a query
+    placed anywhere else, and these tests would not notice.
+    """
+    organization = BackfieldOrganization(name=f"Areas {suffix}", slug=f"areas-{suffix}")
+    session.add(organization)
+    session.commit()
+    session.refresh(organization)
+    organization_id = int(organization.id)  # type: ignore[arg-type]
+
+    project = BackfieldProject(
+        **project_ownership_fields(session, organization_id),
+        organization_id=organization_id,
+        name=f"Areas {suffix}",
+        slug=f"areas-{suffix}",
+    )
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    project_id = int(project.id)  # type: ignore[arg-type]
+
+    articles: dict[str, int] = {}
+    # The first box spans about 215 by 138 miles, the scale of a state. The
+    # second spans about one mile, the scale of a city block.
+    for key, headline, half_lng, half_lat in (
+        ("state", "Statewide budget vote", 2.0, 1.0),
+        ("block", "Corner store reopens", 0.007, 0.007),
+    ):
+        article = SubstrateArticle(
+            project_id=project_id,
+            headline=headline,
+            text=headline,
+            pub_date=date(2024, 5, 1),
+        )
+        session.add(article)
+        session.commit()
+        session.refresh(article)
+        articles[key] = int(article.id)  # type: ignore[arg-type]
+
+        location = SubstrateLocation(
+            project_id=project_id,
+            name=f"{key}-{suffix}",
+            normalized_name=f"{key}-{suffix}",
+            location_type="state" if key == "state" else "neighborhood",
+            formatted_address=f"{key}-{suffix}",
+        )
+        assign_geojson_geometry(
+            session,
+            location,
+            _rectangle(half_lng=half_lng, half_lat=half_lat),
+        )
+        session.add(location)
+        session.commit()
+        session.refresh(location)
+        session.add(
+            SubstrateLocationMention(
+                article_id=articles[key],
+                location_id=int(location.id),  # type: ignore[arg-type]
+                nature="primary",
+            )
+        )
+        session.commit()
+
+    return project_id, articles["state"], articles["block"]
+
+
+@requires_postgres
+def test_a_state_scale_area_does_not_answer_a_two_mile_radius() -> None:
+    engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as session:
+        project_id, state_id, block_id = _seed_two_areas(session, suffix)
+        try:
+            found = _ids(session, project_id=project_id, radius_miles=2.0)
+            assert block_id in found, (
+                "a block-scale area should still answer a two-mile radius over it"
+            )
+            assert state_id not in found, (
+                "a state-scale area should not answer a two-mile radius inside it"
+            )
+        finally:
+            _cleanup(session, project_id)
+
+
+@requires_postgres
+def test_a_state_scale_area_still_answers_a_state_scale_radius() -> None:
+    """The rule is relative to the radius asked for, not a blanket exclusion.
+
+    Without this, a change that simply dropped every large area would pass the
+    test above while leaving coarse places unreachable at any radius.
+    """
+    engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as session:
+        project_id, state_id, block_id = _seed_two_areas(session, suffix)
+        try:
+            found = _ids(session, project_id=project_id, radius_miles=200.0)
+            assert state_id in found
+            assert block_id in found
+        finally:
+            _cleanup(session, project_id)
+
+
+@requires_postgres
+def test_a_caller_can_widen_the_limit() -> None:
+    engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as session:
+        project_id, state_id, block_id = _seed_two_areas(session, suffix)
+        try:
+            found = _ids(
+                session,
+                project_id=project_id,
+                radius_miles=2.0,
+                max_place_radius_miles=500.0,
+            )
+            assert state_id in found
+            assert block_id in found
+        finally:
+            _cleanup(session, project_id)
