@@ -10,6 +10,11 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from agate_nodes.processing_guard.node import (
+    guard_summary_needs_attention,
+    mark_guard_continued_anyway,
+)
+
 from agate_runtime.context import AgateEnvContext
 from agate_runtime.graph_validation import validate_graph_invariants
 from agate_runtime.node_output_contract import (
@@ -57,6 +62,34 @@ def _node_type_to_output_slug(node_type: str) -> str:
 
 class GraphExecutionError(Exception):
     pass
+
+
+class NeedsAttention(Exception):
+    """A Processing Guard held the story before later steps ran.
+
+    ``outputs`` contains only the nodes that finished. This is not a failure.
+    """
+
+    def __init__(self, outputs: dict[str, Any]) -> None:
+        self.outputs = outputs
+        super().__init__("Processing guard needs attention")
+
+
+def _raise_if_guard_holds(
+    node: NodeConfig,
+    output: dict[str, Any],
+    *,
+    by_id: dict[str, NodeConfig],
+    order: list[str],
+    node_outputs: dict[str, dict[str, Any]],
+    continue_past_processing_guard: bool = False,
+) -> None:
+    if node.type != "ProcessingGuard" or not guard_summary_needs_attention(output):
+        return
+    if continue_past_processing_guard:
+        mark_guard_continued_anyway(output)
+        return
+    raise NeedsAttention(_remap_outputs_for_json(by_id, order, node_outputs))
 
 
 def _parallel_levels_enabled() -> bool:
@@ -318,6 +351,8 @@ def _remap_outputs_for_json(
     id_to_public = _public_node_output_keys(by_id, order)
     out: dict[str, Any] = {}
     for node_id in order:
+        if node_id not in node_outputs:
+            continue
         public_key = id_to_public[node_id]
         raw_output = node_outputs[node_id]
         node_type = by_id[node_id].type
@@ -454,6 +489,7 @@ def _execute_graph_sequential(
     *,
     before_each_node: Callable[[str, str], None] | None,
     after_each_node: AfterEachNodeHook | None = None,
+    continue_past_processing_guard: bool = False,
 ) -> dict[str, Any]:
     by_id = {node.id: node for node in spec.nodes}
     order = _topo_order(spec)
@@ -485,6 +521,14 @@ def _execute_graph_sequential(
                 node, inputs, runners, before_each_node, after_each_node
             )
             completed_ids.add(node.id)
+            _raise_if_guard_holds(
+                node,
+                node_outputs[node.id],
+                by_id=by_id,
+                order=order,
+                node_outputs=node_outputs,
+                continue_past_processing_guard=continue_past_processing_guard,
+            )
 
     return _remap_outputs_for_json(by_id, order, node_outputs)
 
@@ -496,6 +540,7 @@ def _execute_graph_parallel_levels(
     before_each_node: Callable[[str, str], None] | None,
     after_each_node: AfterEachNodeHook | None = None,
     async_runners: Mapping[str, AsyncNodeRunner],
+    continue_past_processing_guard: bool = False,
 ) -> dict[str, Any]:
     by_id = {node.id: node for node in spec.nodes}
     order = _topo_order(spec)
@@ -532,6 +577,18 @@ def _execute_graph_parallel_levels(
             )
         )
         node_outputs.update(level_results)
+        for node in level_nodes:
+            output = node_outputs.get(node.id)
+            if output is None:
+                continue
+            _raise_if_guard_holds(
+                node,
+                output,
+                by_id=by_id,
+                order=order,
+                node_outputs=node_outputs,
+                continue_past_processing_guard=continue_past_processing_guard,
+            )
 
     return _remap_outputs_for_json(by_id, order, node_outputs)
 
@@ -543,6 +600,7 @@ async def _execute_graph_ready_parallel_async(
     before_each_node: Callable[[str, str], None] | None,
     after_each_node: AfterEachNodeHook | None = None,
     async_runners: Mapping[str, AsyncNodeRunner],
+    continue_past_processing_guard: bool = False,
 ) -> dict[str, Any]:
     by_id = {node.id: node for node in spec.nodes}
     order = _topo_order(spec)
@@ -595,6 +653,21 @@ async def _execute_graph_ready_parallel_async(
             node_outputs[node_id] = result
             completed_ids.add(node_id)
             del in_flight[node_id]
+            try:
+                _raise_if_guard_holds(
+                    by_id[node_id],
+                    result,
+                    by_id=by_id,
+                    order=order,
+                    node_outputs=node_outputs,
+                    continue_past_processing_guard=continue_past_processing_guard,
+                )
+            except NeedsAttention:
+                for pending_task in in_flight.values():
+                    pending_task.cancel()
+                if in_flight:
+                    await asyncio.gather(*in_flight.values(), return_exceptions=True)
+                raise
         _launch_ready()
         if not in_flight and pending_ids:
             raise GraphExecutionError("Deadlock: no nodes ready to execute")
@@ -609,6 +682,7 @@ def _execute_graph_ready_parallel(
     before_each_node: Callable[[str, str], None] | None,
     after_each_node: AfterEachNodeHook | None = None,
     async_runners: Mapping[str, AsyncNodeRunner],
+    continue_past_processing_guard: bool = False,
 ) -> dict[str, Any]:
     return asyncio.run(
         _execute_graph_ready_parallel_async(
@@ -617,6 +691,7 @@ def _execute_graph_ready_parallel(
             before_each_node=before_each_node,
             after_each_node=after_each_node,
             async_runners=async_runners,
+            continue_past_processing_guard=continue_past_processing_guard,
         )
     )
 
@@ -627,6 +702,7 @@ def execute_graph(
     *,
     before_each_node: Callable[[str, str], None] | None = None,
     after_each_node: AfterEachNodeHook | None = None,
+    continue_past_processing_guard: bool = False,
 ) -> dict[str, Any]:
     """
     Run all nodes in dependency order.
@@ -644,6 +720,10 @@ def execute_graph(
     ``after_each_node``, when provided, is invoked as ``(node_id, node_type, elapsed_s)``
     after each node's runner completes (wall-clock including non-LLM work).
 
+    ``continue_past_processing_guard`` keeps later steps running for this attempt when a
+    Processing Guard limit is exceeded. The guard findings stay on the result and
+    ``continued_anyway`` is set. Later attempts still stop unless the flag is passed again.
+
     Returns a JSON-serializable dict whose top-level keys are stable snake_case strings
     per node (for example ``text_input``, ``json_output``, ``stylebook_output``), not
     internal React Flow ids. Execution still uses internal ids for wiring; downstream
@@ -659,7 +739,12 @@ def execute_graph(
             before_each_node=before_each_node,
             after_each_node=after_each_node,
             async_runners=ASYNC_NODE_RUNNERS,
+            continue_past_processing_guard=continue_past_processing_guard,
         )
     return _execute_graph_sequential(
-        spec, runners, before_each_node=before_each_node, after_each_node=after_each_node
+        spec,
+        runners,
+        before_each_node=before_each_node,
+        after_each_node=after_each_node,
+        continue_past_processing_guard=continue_past_processing_guard,
     )

@@ -54,6 +54,16 @@ import JsonView from '@uiw/react-json-view'
 
 type JsonOutputView = 'reviewed' | 'original'
 
+function guardContinuedAnyway(output: Record<string, unknown> | null | undefined): boolean {
+  if (!output) return false
+  const nodeOutput = output.processing_guard
+  if (!nodeOutput || typeof nodeOutput !== 'object') return false
+  const nested = (nodeOutput as Record<string, unknown>).processing_guard
+  const summary =
+    nested && typeof nested === 'object' ? (nested as Record<string, unknown>) : (nodeOutput as Record<string, unknown>)
+  return summary.continued_anyway === true
+}
+
 const PROCESSED_ITEM_TAB_LABELS: Record<ProcessedItemDetailTab, string> = {
   info: 'Info',
   places: 'Places',
@@ -278,7 +288,8 @@ export default function ProcessedItemDetail() {
       item.status === 'succeeded' ||
       item.status === 'failed' ||
       item.status === 'timed_out' ||
-      item.status === 'skipped'
+      item.status === 'skipped' ||
+      item.status === 'needs_attention'
     if (finished && rerunSawInFlightRef.current) {
       setRerunRequested(false)
       rerunSawInFlightRef.current = false
@@ -599,6 +610,80 @@ export default function ProcessedItemDetail() {
 
   const pageTitle = processedItemDisplayTitle(item)
 
+  const confirmAndRerun = async (continuePastGuard: boolean) => {
+    if (!runId || !itemId) return
+    const snapshotJson = run ? graphSpecSnapshotJsonFromRun(run) : null
+    const { spec: runTimeSpec } = resolveRunGraphSpecForDisplay(snapshotJson, graph?.spec)
+    const originalPolicy = reconciliationPolicyFromGraph({
+      spec: runTimeSpec ?? undefined,
+    })
+    const updatedPolicy = reconciliationPolicyFromGraph(graph)
+    const flowChanged = flowChangedSinceRun(
+      snapshotJson,
+      graph?.spec ? JSON.stringify(graph.spec) : null,
+      run?.flow_changed_since_run,
+    )
+    const offerUpdatedFlow = shouldOfferUpdatedFlow(flowChanged)
+    const reviewWarning = rerunWarningBody(1, {
+      flowName: graph?.name,
+      policy: originalPolicy,
+      offerUpdatedFlow,
+    })
+    const decision = await promptFlowRerun({
+      flowChanged,
+      title: continuePastGuard ? 'Process anyway?' : RERUN_WARNING_TITLE,
+      unchangedConfirmLabel: continuePastGuard ? 'Process anyway' : 'Rerun',
+      description: continuePastGuard
+        ? `This story is outside the limits set on Processing Guard. This attempt will keep going, which may take longer and cost more. Later runs still use those limits. ${reviewWarning}`
+        : reviewWarning,
+      originalPolicy,
+      updatedPolicy,
+      showConfirm,
+      showConfirmChoice,
+    })
+    if (!decision) return
+    rerunSawInFlightRef.current = false
+    setRerunRequested(true)
+    try {
+      setRerunning(true)
+      const rerunRes = await rerunProcessedItem(runId, parseInt(itemId, 10), {
+        useCurrentFlow: decision === 'updated',
+        continuePastProcessingGuard: continuePastGuard,
+      })
+      if (rerunRes.status === 'pending' || rerunRes.status === 'running') {
+        rerunSawInFlightRef.current = true
+        setItem((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: rerunRes.status as ProcessedItem['status'],
+                output: null,
+                reviewed_output: null,
+                overlay: null,
+                error: null,
+              }
+            : prev,
+        )
+      }
+      await loadItemData()
+    } catch (e) {
+      setRerunRequested(false)
+      rerunSawInFlightRef.current = false
+      console.error('Failed to rerun item:', e)
+      const detail =
+        e instanceof Error && e.message.startsWith('API error:')
+          ? e.message.replace(/^API error: \d+ - /, '').trim()
+          : null
+      showError(
+        detail && detail.length < 200
+          ? detail
+          : 'Failed to rerun item. Please try again.',
+      )
+    } finally {
+      setRerunning(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {item.synthetic && (
@@ -638,84 +723,22 @@ export default function ProcessedItemDetail() {
               View on S3
             </Button>
           )}
+          {!item.synthetic && item.status === 'needs_attention' ? (
+            <Button
+              variant="outline"
+              disabled={rerunBusy}
+              onClick={() => void confirmAndRerun(true)}
+            >
+              Process anyway
+            </Button>
+          ) : null}
           {!item.synthetic && (
             <Button
               variant="default"
               disabled={
                 rerunBusy || item.status === 'pending' || item.status === 'running'
               }
-              onClick={async () => {
-                if (!runId || !itemId) return
-                const snapshotJson = run ? graphSpecSnapshotJsonFromRun(run) : null
-                const { spec: runTimeSpec } = resolveRunGraphSpecForDisplay(
-                  snapshotJson,
-                  graph?.spec,
-                )
-                const originalPolicy = reconciliationPolicyFromGraph({
-                  spec: runTimeSpec ?? undefined,
-                })
-                const updatedPolicy = reconciliationPolicyFromGraph(graph)
-                const flowChanged = flowChangedSinceRun(
-                  snapshotJson,
-                  graph?.spec ? JSON.stringify(graph.spec) : null,
-                  run?.flow_changed_since_run,
-                )
-                const offerUpdatedFlow = shouldOfferUpdatedFlow(flowChanged)
-                const decision = await promptFlowRerun({
-                  flowChanged,
-                  title: RERUN_WARNING_TITLE,
-                  unchangedConfirmLabel: 'Rerun',
-                  description: rerunWarningBody(1, {
-                    flowName: graph?.name,
-                    policy: originalPolicy,
-                    offerUpdatedFlow,
-                  }),
-                  originalPolicy,
-                  updatedPolicy,
-                  showConfirm,
-                  showConfirmChoice,
-                })
-                if (!decision) return
-                rerunSawInFlightRef.current = false
-                setRerunRequested(true)
-                try {
-                  setRerunning(true)
-                  const rerunRes = await rerunProcessedItem(runId, parseInt(itemId, 10), {
-                    useCurrentFlow: decision === 'updated',
-                  })
-                  if (rerunRes.status === 'pending' || rerunRes.status === 'running') {
-                    rerunSawInFlightRef.current = true
-                    setItem((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            status: rerunRes.status as ProcessedItem['status'],
-                            output: null,
-                            reviewed_output: null,
-                            overlay: null,
-                            error: null,
-                          }
-                        : prev,
-                    )
-                  }
-                  await loadItemData()
-                } catch (e) {
-                  setRerunRequested(false)
-                  rerunSawInFlightRef.current = false
-                  console.error('Failed to rerun item:', e)
-                  const detail =
-                    e instanceof Error && e.message.startsWith('API error:')
-                      ? e.message.replace(/^API error: \d+ - /, '').trim()
-                      : null
-                  showError(
-                    detail && detail.length < 200
-                      ? detail
-                      : 'Failed to rerun item. Please try again.',
-                  )
-                } finally {
-                  setRerunning(false)
-                }
-              }}
+              onClick={() => void confirmAndRerun(false)}
             >
               {rerunBusy ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -760,6 +783,35 @@ export default function ProcessedItemDetail() {
             reviewDirty={reviewDirty}
             reviewLocked={reviewLocked}
           />
+          {guardContinuedAnyway(item.output) ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Processed anyway</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                <p>
+                  Processing Guard limits were exceeded. This story was processed anyway. Later runs
+                  still use those limits.
+                </p>
+              </CardContent>
+            </Card>
+          ) : null}
+          {item.status === 'needs_attention' ? (
+            <Card className="border-amber-200">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-amber-900">
+                  <AlertTriangle className="h-5 w-5" />
+                  Needs attention
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-muted-foreground">
+                <p>
+                  The Processing Guard stopped the processing of this item, based on the settings
+                  established on the node.
+                </p>
+              </CardContent>
+            </Card>
+          ) : null}
 
       {/* Error Display */}
       {item.error && (
@@ -1043,6 +1095,14 @@ export default function ProcessedItemDetail() {
                       <h3 className="text-lg font-semibold mb-2">Awaiting Output</h3>
                       <p className="text-muted-foreground">
                         Output will appear here once processing finishes.
+                      </p>
+                    </>
+                  ) : item.status === 'needs_attention' ? (
+                    <>
+                      <AlertTriangle className="h-12 w-12 text-amber-600 mx-auto mb-4" />
+                      <h3 className="text-lg font-semibold mb-2">Needs attention</h3>
+                      <p className="text-muted-foreground">
+                        The Processing Guard stopped the processing of this item, based on the settings established on the node.
                       </p>
                     </>
                   ) : (
