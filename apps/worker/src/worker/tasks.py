@@ -19,7 +19,7 @@ from agate_nodes.s3_output.node import (
     s3_output_payloads_in_run_output,
     upload_s3_output_body,
 )
-from agate_runtime import GraphSpec, execute_graph
+from agate_runtime import GraphSpec, NeedsAttention, execute_graph
 from agate_runtime.json_input_batch import json_input_batch_documents_from_spec
 from agate_runtime.nodes import NODE_RUNNERS
 from agate_runtime.nodes.json_input import json_input_output_from_dict
@@ -115,6 +115,7 @@ from worker.s3_ingestion_ledger import (
     find_succeeded_matching_metadata,
     load_claim_token,
     mark_ledger_failed,
+    mark_ledger_needs_attention,
     mark_ledger_succeeded,
 )
 from worker.semantic_indexing.reindex import run_semantic_reindex_for_scope
@@ -606,6 +607,14 @@ def _terminalize_ingestion_ledger_for_item(
             processed_item_id=item_id,
             now=now,
         )
+    elif status == "needs_attention":
+        mark_ledger_needs_attention(
+            session,
+            ledger_id=ledger_id,
+            claim_token=claim_token,
+            processed_item_id=item_id,
+            now=now,
+        )
     else:
         mark_ledger_failed(
             session,
@@ -716,11 +725,15 @@ def _finalize_s3_parent_run(session: Session, run_id: str) -> None:
         for item_id, source_file, status, error_message in items
     ]
     failed_count = sum(1 for _, _, status, _ in items if status == "failed")
+    attention_count = sum(1 for _, _, status, _ in items if status == "needs_attention")
     run.result_json = merge_run_result_payload(run.result_json, items=item_summary)
     previous_status = run.status
     if failed_count:
         run.status = "failed"
         run.error_message = f"{failed_count} of {len(items)} file task(s) failed."
+    elif attention_count:
+        run.status = "needs_attention"
+        run.error_message = None
     else:
         run.status = "succeeded"
         run.error_message = None
@@ -738,7 +751,11 @@ def _finalize_s3_parent_run(session: Session, run_id: str) -> None:
 
 
 @celery_app.task(name="worker.tasks.execute_agate_run")
-def execute_agate_run(run_id: str, spec_json: str | None = None) -> None:
+def execute_agate_run(
+    run_id: str,
+    spec_json: str | None = None,
+    continue_past_processing_guard: bool = False,
+) -> None:
     engine = get_engine()
     with Session(engine) as session:
         run = session.get(AgateRun, run_id)
@@ -778,6 +795,7 @@ def execute_agate_run(run_id: str, spec_json: str | None = None) -> None:
     project_system_prompt: str | None
 
     outputs: dict[str, Any] | None = None
+    attention_outputs: dict[str, Any] | None = None
     node_timings: dict[str, float] = {}
     run_error: str | None = None
     track_tok = None
@@ -827,12 +845,15 @@ def execute_agate_run(run_id: str, spec_json: str | None = None) -> None:
                 node_runners=node_runners,
                 before_each_node=before_node,
                 after_each_node=after_node,
+                continue_past_processing_guard=continue_past_processing_guard,
             )
             _log_node_wall_clock_summary(
                 run_id=run_id,
                 processed_item_id=None,
                 timings=node_timings,
             )
+    except NeedsAttention as attention:
+        attention_outputs = attention.outputs
     except Exception as e:
         run_error = str(e)
     finally:
@@ -851,6 +872,12 @@ def execute_agate_run(run_id: str, spec_json: str | None = None) -> None:
                 run.status = "failed"
                 run.error_message = run_error
                 run.result_json = None
+            elif attention_outputs is not None:
+                if replace_geography and not _graph_has_db_output(spec) and run.id is not None:
+                    clear_replace_article_geography_flags(session, run_id=str(run.id))
+                run.status = "needs_attention"
+                run.result_json = json.dumps(attention_outputs)
+                run.error_message = None
             else:
                 if replace_geography and not _graph_has_db_output(spec) and run.id is not None:
                     clear_replace_article_geography_flags(session, run_id=str(run.id))
@@ -1482,10 +1509,20 @@ def execute_run_replay_setup(source_run_id: str, new_run_id: str) -> None:
     reject_on_worker_lost=True,
     max_retries=None,
 )
-def execute_processed_item(self: Task, item_id: int, spec_json: str | None = None) -> None:
+def execute_processed_item(
+    self: Task,
+    item_id: int,
+    spec_json: str | None = None,
+    continue_past_processing_guard: bool = False,
+) -> None:
     token = _current_processed_item_id.set(int(item_id))
     try:
-        _execute_processed_item_impl(self, item_id, spec_json=spec_json)
+        _execute_processed_item_impl(
+            self,
+            item_id,
+            spec_json=spec_json,
+            continue_past_processing_guard=continue_past_processing_guard,
+        )
     finally:
         _current_processed_item_id.reset(token)
 
@@ -1494,6 +1531,7 @@ def _execute_processed_item_impl(
     task: Task,
     item_id: int,
     spec_json: str | None = None,
+    continue_past_processing_guard: bool = False,
 ) -> None:
     engine = get_engine()
     claimed_at: datetime
@@ -1718,6 +1756,7 @@ def _execute_processed_item_impl(
         return
 
     outputs: dict[str, Any] | None = None
+    attention_outputs: dict[str, Any] | None = None
     node_timings: dict[str, float] = {}
     item_error: str | None = None
 
@@ -1751,19 +1790,31 @@ def _execute_processed_item_impl(
                 node_runners=node_runners,
                 before_each_node=before_node,
                 after_each_node=after_node,
+                continue_past_processing_guard=continue_past_processing_guard,
             )
+    except NeedsAttention as attention:
+        attention_outputs = attention.outputs
     except Exception as e:
         item_error = str(e)
     finally:
         reset_llm_tracking_context(track_tok)
 
-    completed_result_json = json.dumps(outputs) if item_error is None else None
-    completed_article_id = (
-        resolve_substrate_article_id_for_processed_item(outputs=outputs)
-        if item_error is None
-        else None
-    )
-    completed_status = "succeeded" if item_error is None else "failed"
+    if item_error is not None:
+        completed_status = "failed"
+        completed_result_json = None
+        completed_article_id = None
+    elif attention_outputs is not None:
+        completed_status = "needs_attention"
+        completed_result_json = json.dumps(attention_outputs)
+        completed_article_id = None
+    else:
+        completed_status = "succeeded"
+        completed_result_json = json.dumps(outputs) if outputs is not None else None
+        completed_article_id = (
+            resolve_substrate_article_id_for_processed_item(outputs=outputs)
+            if outputs is not None
+            else None
+        )
     with Session(engine) as session:
         finished_at = datetime.now(UTC)
         if not _update_processed_item_outcome_if_active(
