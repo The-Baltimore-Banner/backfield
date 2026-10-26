@@ -155,10 +155,9 @@ def _postgres_geo_ids(
         bind["center_lng"] = params.center_lng
         bind["center_lat"] = params.center_lat
         bind["radius_meters"] = params.radius_miles * MILES_TO_METERS
-        # Measure true geodesic distance from the center, the same way the
-        # ORDER BY below already does. ST_Buffer on a geography returns a
-        # 32-sided polygon inscribed in the circle, so filtering against it
-        # excluded rows the ordering would have ranked. The two are now
+        # Measure geodesic distance from the center, the same way the ORDER BY
+        # below already does. Filtering through an ST_Buffer polygon could leave
+        # out a row that the ordering would have ranked, so the two are now
         # consistent.
         distance_sql = ":radius_meters"
         area_cte = """

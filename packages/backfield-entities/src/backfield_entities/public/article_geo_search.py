@@ -324,17 +324,19 @@ def _postgres_matching_pairs(
         bind["center_lng"] = params.center_lng
         bind["center_lat"] = params.center_lat
         bind["radius_meters"] = params.radius_miles * MILES_TO_METERS
-        # The search area is the center point itself, and the radius is handed
-        # to ST_DWithin as its distance. That measures true geodesic distance on
-        # the WGS84 spheroid.
+        # Hand the radius to ST_DWithin as its distance, so the search area is
+        # the center point itself. That measures geodesic distance on the WGS84
+        # spheroid.
         #
-        # ST_Buffer on a geography does not. It returns a 32-sided polygon
-        # inscribed in the circle, so its edges fall short of the radius asked
-        # for: measured here, a 2-mile buffer comes up 13.3 meters short at the
-        # middle of each edge. The shortfall grows with the radius. Nothing in
-        # the Banner corpus sits in that band, so the two forms return the same
-        # rows today, but one of them answers the question asked and the other
-        # answers a question about a polygon.
+        # ST_Buffer on a geography returns a 32-sided polygon inscribed in the
+        # circle, so its edges sit slightly inside the radius asked for:
+        # measured on PostGIS 3.6, 13.3 m inside at the middle of each edge for
+        # a 2-mile search. Which geometries that left out depended on their
+        # bearing from the center. Nothing in the Banner corpus sits in that
+        # band today, so both forms return the same rows here; one of them
+        # answers the question asked and the other answers a question about a
+        # polygon.
+        # This form also lets the geography index do the work.
         distance_sql = ":radius_meters"
         area_cte = """
         WITH search_area AS (
