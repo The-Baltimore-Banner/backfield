@@ -93,6 +93,7 @@ def _upsert_location_cache(
     location_type: str | None,
     entry: dict[str, Any],
     geocode_type: str | None,
+    geocode_layer: str | None = None,
     geocode_result: dict[str, Any] | None,
     geometry_json: dict[str, Any] | None,
     geometry_value: object | None,
@@ -149,6 +150,7 @@ def _upsert_location_cache(
                 location_name=query_text,
                 location_type=location_type,
                 geocode_type=geocode_type,
+                geocode_layer=geocode_layer,
                 formatted_address=formatted_address,
                 geometry=geometry_value,
                 geometry_type=geometry_type_str,
@@ -450,6 +452,22 @@ def _formatted_address_from_entry(entry: dict[str, Any]) -> str | None:
     return None
 
 
+def _geocode_layer_from_entry(entry: dict[str, Any]) -> str | None:
+    """The granularity the geocoder reported, e.g. ``address``, ``locality``, ``county``.
+
+    Pelias returns it as ``layer``; providers that do not report one leave this
+    ``None``, which means "not reported" rather than "unknown granularity".
+    """
+    geocode = entry.get("geocode") if isinstance(entry.get("geocode"), dict) else None
+    result = geocode.get("result") if geocode and isinstance(geocode.get("result"), dict) else None
+    if not result:
+        return None
+    layer = result.get("geocode_layer")
+    if isinstance(layer, str) and layer.strip():
+        return layer.strip().lower()
+    return None
+
+
 def _geocode_meta_from_entry(entry: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
     geocode = entry.get("geocode") if isinstance(entry.get("geocode"), dict) else None
     if not geocode:
@@ -540,6 +558,7 @@ def _apply_substrate_location_merge(
     external_id: str | None,
     fingerprint: str,
     geocode_type: str | None,
+    geocode_layer: str | None = None,
     formatted_address: str | None,
     details: dict[str, Any],
     geometry_value: object | None,
@@ -566,6 +585,7 @@ def _apply_substrate_location_merge(
         loc.external_source = None
         loc.external_id = None
         loc.geocode_type = None
+        loc.geocode_layer = None
         loc.formatted_address = None
         loc.geometry = None
         loc.geometry_type = None
@@ -577,6 +597,7 @@ def _apply_substrate_location_merge(
         loc.external_source = external_source or loc.external_source
         loc.external_id = external_id or loc.external_id
         loc.geocode_type = geocode_type or loc.geocode_type
+        loc.geocode_layer = geocode_layer or loc.geocode_layer
         loc.formatted_address = formatted_address or loc.formatted_address
         if not keep_editorial_geometry:
             loc.geometry = geometry_value or loc.geometry
@@ -613,6 +634,7 @@ def _upsert_location(
     geometry_json, geometry_value, geometry_type_str = _geometry_parts_from_entry(session, entry)
     h3_cell, h3_resolution = _h3_parts_from_geometry(geometry_json)
     formatted_address = _formatted_address_from_entry(entry)
+    geocode_layer = _geocode_layer_from_entry(entry)
     geocode_type, geocode_result = _geocode_meta_from_entry(entry)
     disposition = str(entry.get("geocode_disposition") or "").strip().lower()
     authoritative_rejection = bucket == "needs_review" and (
@@ -628,6 +650,7 @@ def _upsert_location(
         h3_cell = None
         h3_resolution = None
         formatted_address = None
+        geocode_layer = None
         geocode_type = None
         geocode_result = None
 
@@ -692,6 +715,7 @@ def _upsert_location(
             external_id=external_id,
             identity_fingerprint=fingerprint,
             geocode_type=geocode_type,
+            geocode_layer=geocode_layer,
             formatted_address=formatted_address,
             source_kind="agate_geocode",
             source_details_json=details,
@@ -730,6 +754,7 @@ def _upsert_location(
                 external_id=external_id,
                 fingerprint=fingerprint,
                 geocode_type=geocode_type,
+                geocode_layer=geocode_layer,
                 formatted_address=formatted_address,
                 details=details,
                 geometry_value=geometry_value,
@@ -752,6 +777,7 @@ def _upsert_location(
                 location_type=location_type_str,
                 entry=entry,
                 geocode_type=geocode_type,
+                geocode_layer=geocode_layer,
                 geocode_result=geocode_result if isinstance(geocode_result, dict) else None,
                 geometry_json=geometry_json,
                 geometry_value=geometry_value,
@@ -782,6 +808,7 @@ def _upsert_location(
         external_id=external_id,
         fingerprint=fingerprint,
         geocode_type=geocode_type,
+        geocode_layer=geocode_layer,
         formatted_address=formatted_address,
         details=details,
         geometry_value=geometry_value,
@@ -802,6 +829,7 @@ def _upsert_location(
             location_type=location_type_str,
             entry=entry,
             geocode_type=geocode_type,
+            geocode_layer=geocode_layer,
             geocode_result=geocode_result if isinstance(geocode_result, dict) else None,
             geometry_json=geometry_json,
             geometry_value=geometry_value,

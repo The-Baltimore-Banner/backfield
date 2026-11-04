@@ -704,6 +704,9 @@ async def consolidate_node(state: AgentState) -> AgentState:
             "coordinates": geometry_coords
         },
     }
+    geocode_layer = str(confidence.get("pelias_layer") or "").strip().lower()
+    if geocode_layer:
+        result_base["geocode_layer"] = geocode_layer
     if canonical_id is not None:
         result_base["canonical_id"] = str(canonical_id).strip()
 

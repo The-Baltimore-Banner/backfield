@@ -1706,6 +1706,7 @@ class SubstrateLocation(SQLModel, table=True):
     external_id: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     identity_fingerprint: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     geocode_type: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    geocode_layer: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     formatted_address: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     source_kind: str = Field(
         default="unknown",
@@ -2217,6 +2218,7 @@ class SubstrateLocationCache(SQLModel, table=True):
     location_name: str = Field(sa_column=Column(Text, nullable=False))
     location_type: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     geocode_type: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    geocode_layer: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     formatted_address: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     geometry: object | None = Field(
         default=None,
