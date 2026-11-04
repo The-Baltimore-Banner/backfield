@@ -39,6 +39,22 @@ PLACE_MENTION_NATURE_VALUES: tuple[str, ...] = (
     "unknown",
 )
 
+# PlaceExtract geometric extent (``extent``); prompt: place_extract/prompts/extract.md.
+# ``coextensive``  -- the stored geometry IS the extent of what the story describes
+#                     (a storm across six counties; a county-wide measles report).
+# ``within_place`` -- the stored geometry only BOUNDS it: the event happened somewhere
+#                     inside, and the shape is an uncertainty region, not the event.
+#                     It is not always a point inside an area; a crash on a road is
+#                     ``within_place`` along a line.
+# A mention with neither value recorded is unclassified, and callers must read that as
+# "no containment claim", not as either answer.
+PLACE_MENTION_EXTENT_COEXTENSIVE = "coextensive"
+PLACE_MENTION_EXTENT_WITHIN_PLACE = "within_place"
+PLACE_MENTION_EXTENT_VALUES: tuple[str, ...] = (
+    PLACE_MENTION_EXTENT_COEXTENSIVE,
+    PLACE_MENTION_EXTENT_WITHIN_PLACE,
+)
+
 # Order matches the "Valid types are" section of the PlaceExtract classification prompt.
 PLACE_EXTRACT_LOCATION_TYPES: tuple[str, ...] = (
     "place",

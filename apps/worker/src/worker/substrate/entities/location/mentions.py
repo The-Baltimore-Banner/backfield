@@ -14,7 +14,11 @@ from backfield_db.text_sanitize import strip_nul_bytes
 from backfield_entities.entities.linking.substrate_actions import (
     dispose_orphan_substrate_without_requeue,
 )
-from backfield_entities.entities.location.types import PLACE_MENTION_NATURE_VALUES
+from backfield_entities.entities.location.types import (
+    PLACE_MENTION_EXTENT_COEXTENSIVE,
+    PLACE_MENTION_EXTENT_VALUES,
+    PLACE_MENTION_NATURE_VALUES,
+)
 from sqlalchemy import func
 from sqlmodel import Session, col, select
 
@@ -37,6 +41,14 @@ _NATURE_PRIMARY_SYNONYMS: dict[str, str] = {
 
 _USER_OCCURRENCE_SOURCE_KINDS = frozenset({"user_edit", "user_review"})
 
+# Geometric extent (PlaceExtract `extent`) -> `SubstrateLocationMention.extent`.
+_EXTENT_ALLOWED = frozenset(PLACE_MENTION_EXTENT_VALUES)
+
+# GeoJSON type whose geometry already *is* the thing's location, so the extractor is
+# never asked. A point has no interior for an event to sit inside, so "contained by
+# this point" and "equal to this point" are the same claim to every predicate.
+_POINT_GEOMETRY_TYPE = "point"
+
 
 def _normalize_nature_primary(entry: dict[str, Any]) -> str | None:
     raw = entry.get("nature")
@@ -48,6 +60,45 @@ def _normalize_nature_primary(entry: dict[str, Any]) -> str | None:
     if s in _NATURE_PRIMARY_ALLOWED:
         return s
     return _NATURE_PRIMARY_SYNONYMS.get(s, "unknown")
+
+
+def _normalize_extent(entry: dict[str, Any]) -> str | None:
+    """The extractor's extent, or ``None`` when it did not give a usable one.
+
+    Unlike ``nature`` there is no ``unknown`` member to fall back on, so anything
+    outside the enum becomes ``None``. ``None`` means nothing was recorded, which a
+    containment predicate must read as "no claim", not as either answer.
+    """
+    raw = entry.get("extent")
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip().lower()
+    if s in _EXTENT_ALLOWED:
+        return s
+    return None
+
+
+def _extent_for_mention(
+    session: Session,
+    *,
+    location_id: int,
+    entry: dict[str, Any],
+) -> str | None:
+    """Derive extent from a point geometry; otherwise take what the extractor said.
+
+    The derivation wins over the extractor rather than deferring to it. A point that
+    the model called ``within_place`` is still recorded ``coextensive``, because the
+    geometry we actually stored admits no other reading.
+
+    Reads the *stored* geometry rather than the entry's raw geocode result. A cache
+    hit or an editorial override can make those two disagree, and the containment
+    predicate will match on what the row holds.
+    """
+    location = session.get(SubstrateLocation, int(location_id))
+    geometry_type = str(getattr(location, "geometry_type", "") or "").strip().lower()
+    if geometry_type == _POINT_GEOMETRY_TYPE:
+        return PLACE_MENTION_EXTENT_COEXTENSIVE
+    return _normalize_extent(entry)
 
 
 def _parse_nature_secondary_tags(entry: dict[str, Any]) -> list[str]:
@@ -232,6 +283,7 @@ def _upsert_mention_and_occurrence(
 
     nature_str = _normalize_nature_primary(entry)
     secondary_tags = _parse_nature_secondary_tags(entry)
+    extent_str = _extent_for_mention(session, location_id=location_id, entry=entry)
 
     mention = session.exec(
         select(SubstrateLocationMention).where(
@@ -256,6 +308,7 @@ def _upsert_mention_and_occurrence(
             role_in_story=role_str,
             nature=nature_str,
             nature_secondary_tags_json=secondary_tags,
+            extent=extent_str,
             needs_review=bool(needs_review),
             review_data_json=review_data,
             source_kind="agate_geocode",
@@ -277,6 +330,10 @@ def _upsert_mention_and_occurrence(
         mention.role_in_story = role_str or mention.role_in_story
         mention.nature = nature_str or mention.nature
         mention.nature_secondary_tags_json = secondary_tags
+        # Replaced, not merged with the old value. A stale ``coextensive`` left over
+        # from a geometry that has since become a polygon is the dangerous state;
+        # ``None`` is the safe one.
+        mention.extent = extent_str
         mention.needs_review = bool(needs_review)
         mention.review_data_json = review_data or mention.review_data_json
         mention.source_kind = "agate_geocode"

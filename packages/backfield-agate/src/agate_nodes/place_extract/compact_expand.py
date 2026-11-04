@@ -7,6 +7,7 @@ from typing import Any
 from agate_nodes.place_extract.article_context import ArticleContext, extract_article_context
 from agate_nodes.place_extract.compact_codes import (
     VALID_ADDRESS_PLACE_KINDS,
+    expand_extent,
     expand_nature,
 )
 from agate_nodes.place_extract.components_build import (
@@ -80,4 +81,9 @@ def expand_compact_entry(
     address_place_kind = resolve_address_place_kind(entry, location_type)
     if location_type in STREET_LEVEL_TYPES and address_place_kind:
         out["address_place_kind"] = address_place_kind
+    # Omitted rather than emitted empty, so a row the model left blank keeps the
+    # same shape it had before this column existed.
+    extent = expand_extent(str(entry.get("extent") or ""))
+    if extent:
+        out["extent"] = extent
     return out
