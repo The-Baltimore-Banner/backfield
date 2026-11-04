@@ -9,6 +9,9 @@ from agate_nodes.place_extract.compact_codes import expand_row_enum_fields
 
 logger = logging.getLogger(__name__)
 
+# Append-only. A model that still answers with the previous seven cells pads to ""
+# here, so every earlier column keeps its meaning; inserting a field mid-row would
+# silently shift description, hints and anchor by one.
 ROLE_ARRAY_FIELDS = (
     "location",
     "type",
@@ -17,6 +20,7 @@ ROLE_ARRAY_FIELDS = (
     "description",
     "geocode_hints",
     "evidence_anchor",
+    "extent",
 )
 
 

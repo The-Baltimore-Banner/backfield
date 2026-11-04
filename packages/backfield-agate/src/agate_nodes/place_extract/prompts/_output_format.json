@@ -68,6 +68,7 @@
       "description": "8th Ave S. was the location of several robberies",
       "nature": "primary",
       "nature_secondary_tags": [],
+      "extent": "within_place",
       "geocode_hints": "South Side corridor along 8th Ave S. in Chicago.",
       "components": {
         "place": {},
@@ -97,6 +98,7 @@
       "description": "Phoenix was warmer than Minneapolis during the week of July 5.",
       "nature": "context",
       "nature_secondary_tags": [],
+      "extent": "coextensive",
       "geocode_hints": "",
       "components": {
         "place": {},
@@ -193,6 +195,7 @@
       "description": "Ohio is central to the legislative story in the lede and again near the close.",
       "nature": "primary",
       "nature_secondary_tags": [],
+      "extent": "coextensive",
       "geocode_hints": "",
       "components": {
         "place": {},

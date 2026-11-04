@@ -1771,6 +1771,18 @@ class SubstrateLocationMention(SQLModel, table=True):
         default_factory=list,
         sa_column=Column(JSON, nullable=False),
     )
+    # Whether the location's stored geometry IS this article's event ("coextensive")
+    # or merely CONTAINS it ("within_place"). It lives on the mention, not on the
+    # location, because one location row serves many articles: Annapolis is the whole
+    # story in one and the container of a single shooting in the next.
+    #
+    # NULL is a third state, not a default. Nothing was recorded, so no containment
+    # claim can be read off this row either way.
+    #
+    # Derived from the location's geometry when that geometry is a point, and taken
+    # from the extractor otherwise. A derived value can go stale if an editor later
+    # redraws the shared location row; re-ingesting the article recomputes it.
+    extent: str | None = Field(default=None, sa_column=Column(Text, nullable=True, index=True))
     needs_review: bool = Field(default=False, index=True)
     review_data_json: dict | None = Field(
         default=None,

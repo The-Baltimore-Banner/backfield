@@ -6,7 +6,7 @@ from agate_nodes.place_extract.compact_codes import COMPACT_CODE_LEGEND
 
 COMPACT_OUTPUT_INSTRUCTIONS = """\
 Return ONLY compact JSON with this shape:
-{"locations": [["location", "type", "nature", "address_place_kind", "description", "geocode_hints", "evidence_anchor"], ...]}
+{"locations": [["location", "type", "nature", "address_place_kind", "description", "geocode_hints", "evidence_anchor", "extent"], ...]}
 
 Rules for compact output:
 - Apply all editorial inclusion, exclusion, typing, and formatting rules above —
@@ -30,7 +30,7 @@ Rules for compact output:
   28th Avenue, Minneapolis, MN`).
 - **Neighborhoods and regions:** include city/state in `location` when inferable
   (`Longfellow, Minneapolis, MN`); emit parent city/state rows for region types.
-- Each location is ONE JSON array with EXACTLY seven string fields in this order:
+- Each location is ONE JSON array with EXACTLY eight string fields in this order:
   1. location — full geocodable string per the rules above
   2. type — short type code (see legend below)
   3. nature — short nature code (see legend below)
@@ -42,6 +42,20 @@ Rules for compact output:
      this location. This can differ from `location` when the output is normalized (`1400 block of
      West Argyle Street` for `1400 W Argyle St, Chicago, IL`; `Ald. Jessie Fuentes (26th)` for
      `Ward 26, Chicago, IL`). Use "" only when no article phrase supports the row.
+  8. extent — short extent code (see legend below). Answer this **only for area and
+     line types**: nb, rg, ci, cn, rs, st, rn, cy, pd, nt, sr, sp and ot. For pl, ad,
+     ir and ih use "".
+- **How to pick the extent code.** Ask one question: does the article describe something
+  that fills this whole shape, or something that happened at one spot inside it?
+  - `cx` coextensive — the shape is the subject. A storm warning for six counties; a
+    measles count for one county; a school-board race in one district; car thefts
+    reported across four named cities.
+  - `wi` within_place — the shape is only as close as the article gets. A shooting the
+    story places no more precisely than "in Annapolis"; a crash somewhere along a named
+    road; a protest "downtown" with no address. The event has a real spot; the article
+    did not give it.
+  - Use "" when the article supports neither reading. "" is not a wrong answer; a
+    guess is.
 - Do NOT use full enum names (e.g. intersection_highway) or objects with keys.
 - Do NOT include components, mentions, original_text, nature_secondary_tags, or any other fields.
 - Output every distinct editorially relevant location from the article.

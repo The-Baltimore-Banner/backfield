@@ -232,6 +232,17 @@ For each location whose type is **address**, **intersection_road**, **intersecti
 
 Base the judgment on `original_text`, `description`, and full story context. For all other types (city, neighborhood, place, natural, etc.), **omit** `address_place_kind` entirely.
 
+## Geometric extent (`extent`)
+
+For each location whose type covers an **area or a line** — **neighborhood**, **region_city**, **city**, **county**, **region_state**, **state**, **region_national**, **country**, **political_district**, **natural**, **street_road**, **span**, or **other** — add a top-level string field **`extent`**:
+
+- **`coextensive`** — The shape *is* what the story describes. The thing reported fills the whole area or runs the whole line. A storm warning for six counties; a measles count for one county; a school-board race in one district; a parade along a named stretch of avenue.
+- **`within_place`** — The shape only *bounds* what the story describes. Something happened at a real spot, and the area or line is as close as the article gets to saying where. A shooting the story places no more precisely than "in Annapolis"; a crash somewhere along a named road; a protest "downtown" with no address.
+
+Ask one question: does the article describe something that fills this whole shape, or something that happened at one spot inside it?
+
+**Omit `extent`** entirely for **place**, **address**, **intersection_road** and **intersection_highway**, whose geometry is already the thing's own location. Omit it as well when the article supports neither reading. Omitting it is not a wrong answer; guessing is.
+
 ## Output format
 
 **IMPORTANT**: Return ONLY valid JSON. Do not include any explanatory text before or after the JSON.

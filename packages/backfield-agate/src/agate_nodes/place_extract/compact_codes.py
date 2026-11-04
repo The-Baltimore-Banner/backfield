@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from backfield_entities.entities.location.types import (
     PLACE_EXTRACT_LOCATION_TYPES,
+    PLACE_MENTION_EXTENT_VALUES,
     PLACE_MENTION_NATURE_VALUES,
 )
 
 VALID_TYPES = frozenset(PLACE_EXTRACT_LOCATION_TYPES)
 VALID_NATURES = frozenset(PLACE_MENTION_NATURE_VALUES)
+VALID_EXTENTS = frozenset(PLACE_MENTION_EXTENT_VALUES)
 VALID_ADDRESS_PLACE_KINDS = frozenset({"public_named", "private_residence", "unknown"})
 
 LOCATION_TYPE_TO_CODE: dict[str, str] = {
@@ -57,8 +59,15 @@ ADDRESS_PLACE_KIND_FROM_CODE: dict[str, str] = {
     code: name for name, code in ADDRESS_PLACE_KIND_TO_CODE.items()
 }
 
+EXTENT_TO_CODE: dict[str, str] = {
+    "coextensive": "cx",
+    "within_place": "wi",
+}
+
+EXTENT_FROM_CODE: dict[str, str] = {code: name for name, code in EXTENT_TO_CODE.items()}
+
 COMPACT_CODE_LEGEND = """\
-Use these short codes in array columns 2–4 (type, nature, address_place_kind):
+Use these short codes in array columns 2–4 and 8 (type, nature, address_place_kind, extent):
 
 type (column 2):
   pl place  ad address  ir intersection_road  ih intersection_highway
@@ -71,6 +80,15 @@ nature (column 3):
 
 address_place_kind (column 4; use "" when not street-level):
   pn public_named  pv private_residence  uk unknown
+
+extent (column 8; use "" for point-like types -- place, address, the two
+intersection types -- whose geometry is already the event's own location):
+  cx coextensive   the shape IS what the story describes (a storm across six
+                   counties; a county-wide health report; a district-wide race)
+  wi within_place  the shape only BOUNDS it: the event happened somewhere inside,
+                   and the shape is an uncertainty region, not the event itself
+                   (a shooting reported only as "in Annapolis"; a crash on a road)
+Leave column 8 "" when neither reading is supported by the article.
 """
 
 
@@ -110,6 +128,21 @@ def expand_address_place_kind(value: str) -> str:
     return token
 
 
+def expand_extent(value: str) -> str:
+    """Expand the extent column; "" for absent, unrecognized, or non-area rows.
+
+    Unlike ``nature`` there is no ``unknown`` member to fall back on. An extent the
+    model did not give, or gave as something outside the enum, stays empty, and an
+    empty extent is recorded as NULL rather than guessed at.
+    """
+    token = (value or "").strip().lower()
+    if not token:
+        return ""
+    if token in VALID_EXTENTS:
+        return token
+    return EXTENT_FROM_CODE.get(token, "")
+
+
 def expand_row_enum_fields(entry: dict[str, str]) -> dict[str, str]:
     """Expand compressed enum columns in a compact location dict."""
     expanded = dict(entry)
@@ -121,4 +154,6 @@ def expand_row_enum_fields(entry: dict[str, str]) -> dict[str, str]:
         expanded["address_place_kind"] = expand_address_place_kind(
             str(expanded["address_place_kind"])
         )
+    if "extent" in expanded:
+        expanded["extent"] = expand_extent(str(expanded["extent"]))
     return expanded
