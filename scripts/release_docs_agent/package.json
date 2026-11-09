@@ -6,6 +6,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.27"
+    "@cursor/sdk": "1.3.1"
   }
 }
