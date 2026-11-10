@@ -56,6 +56,11 @@ Rules for compact output:
     did not give it.
   - Use "" when the article supports neither reading. "" is not a wrong answer; a
     guess is.
+- **Column 3 (nature) is ALWAYS one single letter**, from p/s/j/c/h/r/u and nothing
+  else. Columns 2, 4 and 8 are always two letters or "". A two-letter token in
+  column 3 is always wrong: `cx` and `wi` belong in column 8, `pn`, `pv` and `uk`
+  in column 4, and every type code in column 2. Fill column 3 before you think
+  about column 8, and do not let the extent answer change it.
 - Do NOT use full enum names (e.g. intersection_highway) or objects with keys.
 - Do NOT include components, mentions, original_text, nature_secondary_tags, or any other fields.
 - Output every distinct editorially relevant location from the article.

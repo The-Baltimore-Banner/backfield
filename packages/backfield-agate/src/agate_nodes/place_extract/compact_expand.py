@@ -65,7 +65,7 @@ def expand_compact_entry(
     mentions = build_mentions_for_evidence_anchor(article_text, evidence_anchor)
     if not mentions:
         mentions = build_mentions(article_text, location, location_type)
-    nature = expand_nature(str(entry.get("nature") or ""))
+    nature = expand_nature(str(entry.get("nature") or ""), location=location)
 
     out: dict[str, Any] = {
         "location": location,
