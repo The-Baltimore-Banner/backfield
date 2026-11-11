@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from backfield_entities.entities.location.types import (
     PLACE_EXTRACT_LOCATION_TYPES,
     PLACE_MENTION_EXTENT_VALUES,
     PLACE_MENTION_NATURE_VALUES,
 )
+
+logger = logging.getLogger(__name__)
 
 VALID_TYPES = frozenset(PLACE_EXTRACT_LOCATION_TYPES)
 VALID_NATURES = frozenset(PLACE_MENTION_NATURE_VALUES)
@@ -75,7 +79,7 @@ type (column 2):
   cn county  rs region_state  st state  rn region_national  cy country
   pd political_district  nt natural  ot other
 
-nature (column 3):
+nature (column 3; ALWAYS exactly one letter, never a two-letter code):
   p primary  s secondary  j subject  c context  h historical  r person  u unknown
 
 address_place_kind (column 4; use "" when not street-level):
@@ -104,7 +108,32 @@ def expand_location_type(value: str) -> str:
     return token
 
 
-def expand_nature(value: str) -> str:
+def nature_code_slot_owner(token: str) -> str:
+    """Name the column a non-nature token belongs to, or "" if it owns none.
+
+    Every nature code is a single letter and every other compact code column uses
+    two, so the vocabularies are disjoint and a token in the wrong slot can be
+    named with certainty rather than guessed at. This only reports; it never moves
+    the value, because a model that mis-slotted one cell may have mis-slotted more.
+    """
+    if token in LOCATION_TYPE_FROM_CODE or token in VALID_TYPES:
+        return "type (column 2)"
+    if token in ADDRESS_PLACE_KIND_FROM_CODE or token in VALID_ADDRESS_PLACE_KINDS:
+        return "address_place_kind (column 4)"
+    if token in EXTENT_FROM_CODE or token in VALID_EXTENTS:
+        return "extent (column 8)"
+    return ""
+
+
+def expand_nature(value: str, *, location: str = "") -> str:
+    """Expand the nature column, reporting any token outside the nature vocabulary.
+
+    An unrecognized token still becomes ``"unknown"``, which is the only honest
+    answer, but it no longer does so in silence. ``nature='unknown'`` is excluded
+    from the event-role filter geo search uses, so a mis-slotted code drops the
+    mention out of exactly the searches it should answer, and nothing downstream
+    can tell that apart from a genuine ``unknown``.
+    """
     token = (value or "").strip().lower()
     if not token:
         return "unknown"
@@ -113,6 +142,14 @@ def expand_nature(value: str) -> str:
     expanded = NATURE_FROM_CODE.get(token)
     if expanded:
         return expanded
+    owner = nature_code_slot_owner(token)
+    logger.warning(
+        "[PlaceExtract] unrecognized nature code %r on location %r%s; "
+        "recording nature='unknown', which geo search excludes from event roles",
+        token,
+        location,
+        f"; that code belongs to {owner}" if owner else "",
+    )
     return "unknown"
 
 
@@ -149,7 +186,9 @@ def expand_row_enum_fields(entry: dict[str, str]) -> dict[str, str]:
     if "type" in expanded:
         expanded["type"] = expand_location_type(str(expanded["type"]))
     if "nature" in expanded:
-        expanded["nature"] = expand_nature(str(expanded["nature"]))
+        expanded["nature"] = expand_nature(
+            str(expanded["nature"]), location=str(expanded.get("location") or "")
+        )
     if "address_place_kind" in expanded:
         expanded["address_place_kind"] = expand_address_place_kind(
             str(expanded["address_place_kind"])
