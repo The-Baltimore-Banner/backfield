@@ -199,8 +199,9 @@ def test_state_sized_area_does_not_answer_a_two_mile_radius() -> None:
             assert seed.block_article_id in found, (
                 "a city-block area must still answer a two-mile radius over it"
             )
-            assert seed.state_article_id not in found, (
-                "a state-sized area must not answer a two-mile radius inside it"
+            assert seed.state_article_id in found, (
+                "with the ratio heuristic gone, a NULL-extent area matches any "
+                "radius it overlaps -- extent, not size, is what excludes it now"
             )
         finally:
             _cleanup(session, seed.project_id)
@@ -225,23 +226,161 @@ def test_state_sized_area_still_answers_a_state_sized_radius() -> None:
             _cleanup(session, seed.project_id)
 
 
+
+# --- extent: inside, not merely near ----------------------------------------
+#
+# These drive the two-armed predicate. A mention marked ``within_place`` says
+# the article only bounded the event to that shape, so the shape must sit INSIDE
+# the search area to count. ``coextensive`` says the shape IS the story, so it
+# keeps the proximity rule. A NULL extent keeps proximity too, which is what
+# makes the change safe on a corpus that has never been backfilled.
+
+
+def _seed_one_area(
+    session: Session,
+    suffix: str,
+    *,
+    half_lng: float,
+    half_lat: float,
+    extent: str | None,
+) -> tuple[int, int]:
+    """Seed one article whose single mention carries ``extent``."""
+    organization = BackfieldOrganization(name=f"Extent {suffix}", slug=f"extent-{suffix}")
+    session.add(organization)
+    session.commit()
+    session.refresh(organization)
+    organization_id = int(organization.id)  # type: ignore[arg-type]
+
+    project = BackfieldProject(
+        **project_ownership_fields(session, organization_id),
+        organization_id=organization_id,
+        name=f"Extent {suffix}",
+        slug=f"extent-{suffix}",
+    )
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    project_id = int(project.id)  # type: ignore[arg-type]
+
+    article = SubstrateArticle(
+        project_id=project_id,
+        headline=f"Extent {suffix}",
+        text=f"Extent {suffix}",
+        pub_date=date(2024, 5, 1),
+    )
+    session.add(article)
+    session.commit()
+    session.refresh(article)
+
+    location = SubstrateLocation(
+        project_id=project_id,
+        name=f"extent-{suffix}",
+        normalized_name=f"extent-{suffix}",
+        location_type="city",
+        formatted_address=f"extent-{suffix}",
+    )
+    assign_geojson_geometry(
+        session, location, _rectangle(half_lng=half_lng, half_lat=half_lat)
+    )
+    session.add(location)
+    session.commit()
+    session.refresh(location)
+
+    session.add(
+        SubstrateLocationMention(
+            article_id=int(article.id),  # type: ignore[arg-type]
+            location_id=int(location.id),  # type: ignore[arg-type]
+            nature="primary",
+            extent=extent,
+        )
+    )
+    session.commit()
+    return project_id, int(article.id)  # type: ignore[arg-type]
+
+
+# A box far larger than the search radius: it surrounds the circle rather than
+# sitting inside it. This is the shape the two arms disagree on.
+_SURROUNDING = {"half_lng": 2.0, "half_lat": 1.0}
+# A box well inside a two-mile circle.
+_INSIDE = {"half_lng": 0.007, "half_lat": 0.007}
+
+
 @requires_postgres
-def test_caller_can_ask_for_coarse_areas_back() -> None:
+@pytest.mark.parametrize(
+    ("extent", "expected"),
+    [
+        (None, True),
+        ("coextensive", True),
+        ("within_place", False),
+    ],
+)
+def test_extent_decides_whether_a_surrounding_area_matches(
+    extent: str | None, expected: bool
+) -> None:
+    """One shape, three readings, two answers.
+
+    The NULL row is the important one. Written as ``lm.extent <> 'within_place'``
+    the clause evaluates to NULL for it, ``NULL OR false`` drops the row, and
+    containment would silently apply to an entire un-backfilled corpus while the
+    ``within_place`` case below still passed. ``IS DISTINCT FROM`` is what makes
+    this case come out True.
+    """
     engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
     suffix = uuid4().hex[:12]
     with Session(engine) as session:
-        seed = _seed(session, suffix)
+        project_id, article_id = _seed_one_area(
+            session, suffix, extent=extent, **_SURROUNDING
+        )
         try:
-            found = _ids(
-                session,
-                project_id=seed.project_id,
-                radius_miles=2.0,
-                max_place_radius_miles=500.0,
-            )
-            assert seed.state_article_id in found
-            assert seed.block_article_id in found
+            found = _ids(session, project_id=project_id, radius_miles=2.0)
+            assert (article_id in found) is expected
         finally:
-            _cleanup(session, seed.project_id)
+            _cleanup(session, project_id)
+
+
+@requires_postgres
+def test_a_within_place_area_inside_the_circle_still_matches() -> None:
+    """Containment is a real test, not a blanket exclusion of within_place.
+
+    Without this, a predicate that simply dropped every ``within_place`` row
+    would pass the case above.
+    """
+    engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as session:
+        project_id, article_id = _seed_one_area(
+            session, suffix, extent="within_place", **_INSIDE
+        )
+        try:
+            found = _ids(session, project_id=project_id, radius_miles=2.0)
+            assert article_id in found
+        finally:
+            _cleanup(session, project_id)
+
+
+@requires_postgres
+def test_a_within_place_area_is_excluded_in_bbox_mode_too() -> None:
+    """Box mode runs the same arm against the envelope, with no buffer."""
+    engine = create_engine(_DATABASE_URL, pool_pre_ping=True)
+    suffix = uuid4().hex[:12]
+    with Session(engine) as session:
+        project_id, article_id = _seed_one_area(
+            session, suffix, extent="within_place", **_SURROUNDING
+        )
+        try:
+            params = PublicArticleGeoSearchParams(
+                mode=PublicArticleGeoSearchMode.bbox,
+                min_lng=CENTER_LNG - 0.02,
+                min_lat=CENTER_LAT - 0.02,
+                max_lng=CENTER_LNG + 0.02,
+                max_lat=CENTER_LAT + 0.02,
+            )
+            items, _total = search_public_articles_by_geo(
+                session, project_id=project_id, params=params
+            )
+            assert article_id not in {int(i.id) for i in items}
+        finally:
+            _cleanup(session, project_id)
 
 
 def _ring_of_points(session: Session, suffix: str, *, radius_miles: float, fraction: float):
