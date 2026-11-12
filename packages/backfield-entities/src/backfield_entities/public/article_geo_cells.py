@@ -11,6 +11,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlmodel import Session, col, select
 
+from backfield_entities.entities.location.types import (
+    PLACE_MENTION_EXTENT_WITHIN_PLACE,
+)
 from backfield_entities.geo.h3_index import EARTH_RADIUS_KM, POINT_H3_RESOLUTION
 from backfield_entities.public.article_geo_cell_detail import (
     PublicArticleGeoMentionFilters,
@@ -215,6 +218,7 @@ def _postgres_candidate_rows(
 ) -> list[tuple[int, str, int]]:
     bind: dict[str, object] = {
         "project_id": project_id,
+        "extent_within_place": PLACE_MENTION_EXTENT_WITHIN_PLACE,
         "min_lng": params.min_lng,
         "min_lat": params.min_lat,
         "max_lng": params.max_lng,
@@ -232,7 +236,11 @@ def _postgres_candidate_rows(
             SELECT ST_SetSRID(
                 ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326),
                 4326
-            )::geography AS geom
+            )::geography AS geom,
+            ST_SetSRID(
+                ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326),
+                4326
+            ) AS area
         )
         SELECT lm.article_id, sl.h3_cell, sl.h3_resolution
         FROM substrate_location_mention lm
@@ -246,6 +254,10 @@ def _postgres_candidate_rows(
           AND sl.h3_cell IS NOT NULL
           AND sl.h3_resolution IS NOT NULL
           AND ST_DWithin(sl.geometry::geography, sa.geom, 0)
+          AND (
+                lm.extent IS DISTINCT FROM :extent_within_place
+                OR ST_CoveredBy(sl.geometry, sa.area)
+              )
         """
         + location_type_filter
         + nature_filter
